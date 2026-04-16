@@ -1,0 +1,166 @@
+================================================================================
+  LOBSTER CRAMMING TRAINING - REPRODUCING PAPER SETTINGS WITH lobster_train
+================================================================================
+
+OVERVIEW
+--------
+lobster_train uses Hydra configs. The base config is at:
+  src/lobster/hydra_config/train.yaml
+
+Default model config (model=mlm) is at:
+  src/lobster/hydra_config/model/mlm.yaml
+
+All paper settings are overridden via CLI flags on lobster_train.
+
+
+KEY INSIGHT: MODEL CHOICE
+--------------------------
+Do NOT use model_name=esm2_t6_8M_UR50D (or any esm2_* name).
+Those load a pretrained HuggingFace ESM2 and ignore model_kwargs (no bias removal).
+
+Instead, use one of the custom PMLM configs which train from scratch with the
+ESM2-like architecture and already have all biases removed:
+
+  MLM_mini   -  tiny test model
+  MLM_11M    -  11M params  (8 layers, 12 heads, hidden=384)
+  MLM_24M    -  24M params  (10 layers, 12 heads, hidden=408)
+  MLM_68M    -  68M params  (12 layers, 12 heads, hidden=768)
+  MLM_83M    -  83M params  (14 layers, 12 heads, hidden=792)
+  MLM_113M   - 113M params  (20 layers, 12 heads, hidden=780)
+  MLM_150M   - 150M params  (27 layers, 12 heads, hidden=768)
+  MLM_650M   - 650M params  (33 layers, 20 heads, hidden=1280)
+  MLM_3B     -   3B params  (36 layers, 40 heads, hidden=2560)
+
+All MLM_11M+ configs already set:
+  query_bias=False, key_bias=False, value_bias=False, intermediate_bias=False
+
+This matches the paper: "remove all query, key, and value biases in all attention
+blocks" and "remove all bias terms in intermediate linear layers."
+
+
+PAPER SETTING -> lobster_train MAPPING
+---------------------------------------
+
+Paper Setting                    | lobster_train Override
+---------------------------------|----------------------------------------------
+Architecture (no biases)         | model.model_name=MLM_150M  (pick your size)
+Batch size = 128                 | data.batch_size=128
+Max sequence length = 512        | model.max_length=512       (already default)
+Gradient accumulation = 16       | trainer.accumulate_grad_batches=16
+Masking rate = 25%               | model.mask_percentage=0.25 (already default)
+AdamW beta1 = 0.99              | model.beta1=0.99
+AdamW beta2 = 0.98              | model.beta2=0.98           (already default)
+AdamW epsilon = 1e-12           | model.eps=1e-12            (already default)
+Gradient clipping = 0.5         | trainer.gradient_clip_val=0.5
+Mixed precision (AMP)           | trainer.precision=16-mixed
+Max training steps = 50,000     | trainer.max_steps=50000
+Learning rate = 1e-3            | model.lr=1e-3              (already default)
+Linear LR decay                 | model.scheduler=linear
+Warmup steps = 1,000            | model.num_warmup_steps=1000
+Total steps (for scheduler)     | model.num_training_steps=50000
+
+
+FULL COMMAND
+------------
+Replace /path/to/uniref50.fasta with your training FASTA file.
+Pick the model size you want (MLM_150M shown below).
+
+lobster_train \
+  data.path_to_fasta="/path/to/uniref50.fasta" \
+  model.model_name=MLM_150M \
+  model.lr=1e-3 \
+  model.beta1=0.99 \
+  model.beta2=0.98 \
+  model.eps=1e-12 \
+  model.mask_percentage=0.25 \
+  model.max_length=512 \
+  model.scheduler=linear \
+  model.num_warmup_steps=1000 \
+  model.num_training_steps=50000 \
+  data.batch_size=128 \
+  trainer.max_steps=50000 \
+  trainer.accumulate_grad_batches=16 \
+  trainer.gradient_clip_val=0.5 \
+  trainer.precision=16-mixed \
+  trainer.devices=1 \
+  logger=wandb \
+  paths.root_dir="."
+
+
+MINIMAL COMMAND (relying on defaults already matching the paper)
+----------------------------------------------------------------
+Several values already match paper defaults (lr, beta2, eps, mask_percentage,
+max_length). This shorter version only overrides what differs from defaults:
+
+lobster_train \
+  data.path_to_fasta="/path/to/uniref50.fasta" \
+  model.model_name=MLM_150M \
+  model.beta1=0.99 \
+  model.scheduler=linear \
+  model.num_warmup_steps=1000 \
+  model.num_training_steps=50000 \
+  data.batch_size=128 \
+  trainer.max_steps=50000 \
+  trainer.accumulate_grad_batches=16 \
+  trainer.gradient_clip_val=0.5 \
+  trainer.precision=16-mixed \
+  logger=wandb \
+  paths.root_dir="."
+
+
+QUICK TEST (small model, CSV logger, no GPU needed)
+----------------------------------------------------
+lobster_train \
+  data.path_to_fasta="test_data/query.fasta" \
+  model.model_name=MLM_mini \
+  model.beta1=0.99 \
+  model.scheduler=linear \
+  model.num_warmup_steps=10 \
+  model.num_training_steps=100 \
+  data.batch_size=4 \
+  trainer.max_steps=100 \
+  trainer.accumulate_grad_batches=2 \
+  trainer.gradient_clip_val=0.5 \
+  trainer.precision=32 \
+  logger=csv \
+  paths.root_dir="."
+
+
+EFFECTIVE BATCH SIZE CALCULATION
+---------------------------------
+  batch_size (128) x accumulate_grad_batches (16) = 2,048 sequences/update
+  2,048 sequences x 512 tokens/sequence = 1,048,576 tokens/update
+
+This matches the paper exactly.
+
+
+MULTI-GPU (if available)
+-------------------------
+To use multiple GPUs, adjust trainer.devices and optionally trainer.num_nodes.
+With more GPUs, reduce accumulate_grad_batches proportionally to maintain the
+same effective batch size.
+
+Example with 4 GPUs:
+  trainer.devices=4 trainer.accumulate_grad_batches=4
+
+Example with 8 GPUs across 2 nodes:
+  trainer.devices=4 trainer.num_nodes=2 trainer.accumulate_grad_batches=2
+
+
+NOTES
+-----
+1. The MLM_* model names train from SCRATCH (random init). They do NOT load
+   pretrained weights. This is the "cramming" approach from the paper.
+
+2. The model uses rotary position embeddings by default (position_embedding_type
+   is "rotary" in LobsterPMLM). This matches modern ESM2 variants.
+
+3. model.num_training_steps controls the scheduler horizon (when LR reaches 0).
+   trainer.max_steps controls when training actually stops. Set both to 50000
+   so the LR anneals to ~0 by the end of training.
+
+4. The paper found the learning rate schedule was the most critical hyperparameter.
+   Linear decay with 1000-step warmup and slow cooldown to 50,000 steps was optimal.
+
+5. For logging to Weights & Biases, set logger=wandb (default).
+   For local CSV logging, set logger=csv.

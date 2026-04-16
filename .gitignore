@@ -67,3 +67,5 @@ test_dxt/*
 src/lobster/model/integrations/ume_huggingface/model/*
 
 *.sh
+
+!slurm/personal/*.sh
